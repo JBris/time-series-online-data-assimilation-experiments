@@ -1,0 +1,92 @@
+---
+title: "4-Ordinary linear regression"
+format: html
+editor: visual
+---
+
+```{r}
+library(tidyverse)
+library(lubridate)
+
+df <- read_csv("data/linearregression.csv") %>% transform(TIMESTAMP = ymd(TIMESTAMP))
+head(df)
+```
+
+```{r}
+df <- df %>% mutate(tite = ti - te)
+lm1.fit = lm(e_hp ~ tite + 0, data=df)
+summary(lm1.fit)
+```
+
+```{r}
+conf.int = as.data.frame( predict(lm1.fit, interval="confidence") )
+pred.int = as.data.frame( predict(lm1.fit, interval="prediction") )
+
+ggplot() +
+  geom_point(data = df, aes(tite, e_hp)) +
+  geom_line(aes(x=df$tite, y=pred.int$fit)) +
+  geom_ribbon(aes(x=df$tite, ymin=pred.int$lwr, ymax=pred.int$upr), alpha=0.2, fill='blue') +
+  geom_ribbon(aes(x=df$tite, ymin=conf.int$lwr, ymax=conf.int$upr), alpha=0.2, fill='red')
+```
+
+```{r}
+df <- df %>% mutate(titg = ti - tg,
+                    tits = ti - ts,
+                    vtite = wind_speed * (ti-te))
+lm2.fit = lm(e_hp ~ tite + titg + i_sol + tits + vtite + 0, data=df)
+summary(lm2.fit)
+```
+
+```{r}
+lm3.fit = lm(e_hp ~ tite + i_sol + tits + 0, data=df)
+summary(lm3.fit)
+```
+
+```{r}
+par(mfrow=c(2,2))
+plot(lm3.fit)
+```
+
+
+```{r}
+library(rstan)
+rstan_options(auto_write = TRUE)
+rstan_options(threads_per_chain = 1)
+options(mc.cores = parallel::detectCores())
+
+lr_model= "
+data {
+  int<lower=0> N;   // number of data items
+  int<lower=0> K;   // number of predictors
+  matrix[N, K] x;   // predictor matrix
+  vector[N] y;      // outcome vector
+}
+parameters {
+  vector[K] theta;       // coefficients for predictors
+  real<lower=0> sigma;  // error scale
+}
+model {
+  y ~ normal(x * theta, sigma);  // likelihood
+}
+"
+
+model_data <- list(
+  N = nrow(df),
+  K = 3,
+  x = df %>% select(tite, i_sol, tits),
+  y = df$e_hp
+)
+
+fit1 <- stan(
+  model_code = lr_model,    # Stan program
+  data = model_data,        # named list of data
+  chains = 4,               # number of Markov chains
+  warmup = 1000,            # number of warmup iterations per chain
+  iter = 4000,              # total number of iterations per chain
+  cores = 2,                # number of cores (could use one per chain)
+)
+
+print(fit1)
+traceplot(fit1)
+pairs(fit1)
+```

@@ -1,0 +1,104 @@
+---
+title: "7-Autoregressive-models"
+format: html
+editor: visual
+---
+
+
+```{r}
+library(rstan)
+library(tidyverse)
+library(lubridate)
+
+df <- read.csv("data/building_1298.csv")
+
+head(df)
+```
+
+```{r}
+df <- df %>% 
+  mutate(Date = as_date(datetime),
+         hour = hour(datetime),
+         wday = wday(Date),
+         week.end = wday==1 | wday==7) %>%
+  fill(air_temperature, wind_speed)
+
+trainingStart <- as.Date("2016-05-01", "%Y-%m-%d")
+trainingEnd <- as.Date("2016-05-31", "%Y-%m-%d")
+testEnd <- as.Date("2016-06-07", "%Y-%m-%d")
+df.train <- df %>% filter(datetime > trainingStart, datetime < trainingEnd)
+df.test <- df %>% filter(datetime > trainingStart, datetime < testEnd)
+
+```
+
+```{r}
+model = "
+data {
+  int<lower=0> N_train;     // data points (training)
+  int<lower=0> N;           // data points (all)
+  int<lower=0> K;       // number of predictors
+  int P;                // AR order
+
+  matrix[N, K] x;       // predictor matrix (training and test)
+  vector[N_train] y;    // output data
+}
+
+parameters {
+  real alpha;                 // mean coeff
+  row_vector[P] beta;         // AR parameters
+  row_vector[P+1] theta[K];   // coefficients of explanatory variables
+  real<lower=0> sigma;        // error term
+}
+
+model {
+  for (n in P+1:N_train) {
+    real ex = 0;
+    for (j in 1:K)
+        ex += theta[j] * x[n-P:n, j];
+    y[n] ~ normal(alpha + beta * y[n-P:n-1] + ex, sigma);
+    }
+}
+
+generated quantities {
+  vector[N] y_new;
+  
+  for (n in 1:P)
+    y_new[n] = y[n];
+  
+  for (n in P+1:N_train) {
+    real ex = 0;
+    for (j in 1:K)
+        ex += theta[j] * x[n-P:n, j];
+    y_new[n] = normal_rng(alpha + beta * y[n-P:n-1] + ex, sigma);
+  }
+  
+  for (n in N_train+1:N) {
+    real ex = 0;
+    for (j in 1:K)
+        ex += theta[j] * x[n-P:n, j];
+    y_new[n] = normal_rng(alpha + beta * y_new[n-P:n-1] + ex, sigma);
+  }
+}
+"
+
+model.data <- list(
+  N_train = nrow(df.train),  # number of training data points
+  N = nrow(df.test),         # total number of data points
+  K = 1,                     # number of predictors
+  P = 1,                     # AR order
+  y = df.train$m0 ,          # dependent variable (training data)
+  x = df.test %>% select(air_temperature) # explanatory variables (all data)
+)
+
+fit <- stan(
+  model_code = model,  # Stan program
+  data = model.data,        # named list of data
+  chains = 4,               # number of Markov chains
+  warmup = 1000,            # number of warmup iterations per chain
+  iter = 2000,              # total number of iterations per chain
+  cores = 2,                # number of cores (could use one per chain)
+  refresh = 1,              # progress not shown
+)
+
+print(fit, pars=c("alpha", "beta", "theta", "sigma"))
+```

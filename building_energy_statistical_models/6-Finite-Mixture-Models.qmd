@@ -1,0 +1,95 @@
+---
+title: "6-Finite-Mixture-Models"
+format: html
+editor: visual
+---
+
+```{r}
+library(rstan)
+library(tidyverse)
+
+df <- read_csv("data/mixture.csv")
+nrow(df)
+summary(df)
+```
+
+```{r}
+library(GGally)
+ggpairs(df, columns=c("mean_consumption", "ratio_house", "ratio_apartment"))
+```
+
+```{r}
+mixture <- "
+data {
+  // This block declares all data which will be passed to the Stan model.
+  int<lower=0> N;       // number of data items in the training dataset
+  int<lower=0> K;       // number of components
+  real y[N];            // outcome energy vector
+  real l[N, K];         // ratios in the training dataset
+}
+parameters {
+  // This block declares the parameters of the model.
+  vector[K] mu;
+  vector[K] sigma;
+}
+model {
+  for (n in 1:N) {
+    vector[K] lps;
+    for (k in 1:K) {
+      lps[k] = log(l[n, k]) + lognormal_lpdf(y[n] | mu[k], sigma[k]);
+    }
+    target += log_sum_exp(lps);
+  }
+}
+"
+
+train_ind <- sample(seq_len(nrow(df)), size = floor(0.75 * nrow(df)))
+
+train <- df[train_ind, ]
+test <- df[-train_ind, ]
+
+model_data <- list(
+  N = nrow(train),
+  N_test = nrow(test),
+  K = 2,
+  y = train$mean_consumption,
+  l = train %>% select(ratio_house, ratio_apartment)
+)
+
+# Fittage
+fit1 <- stan(
+  model_code = mixture,  # Stan program
+  data = model_data,        # named list of data
+  chains = 2,               # number of Markov chains. 4 is better, 2 is faster
+  warmup = 1000,            # number of warmup iterations per chain
+  iter = 4000,              # total number of iterations per chain
+  cores = 2,                # number of cores (could use one per chain)
+)
+
+print(fit1, pars=c("mu", "sigma", "lp__"))
+```
+
+```{r}
+traceplot(fit1, pars=c("mu", "sigma", "lp__"))
+```
+
+```{r}
+pairs(fit1, pars=c("mu", "sigma", "lp__"))
+```
+
+```{r}
+# Extracting distribution parameters from the fit object
+la <- rstan::extract(fit1, permuted = TRUE)
+mu <- colMeans(la$mu)
+sigma <- colMeans(la$sigma)
+
+# Predict the consumption of the test data from the ratios
+test$y <- test$ratio_house * rlnorm(nrow(test), mu[1], sigma[1]) +
+  test$ratio_apartment * rlnorm(nrow(test), mu[2], sigma[2])
+
+# Plot to compare measured and predicted consumption on the test data
+ggplot(data=test) +
+  geom_histogram(mapping=aes(x=mean_consumption), bins=50, color='blue', alpha=0.3) +
+  geom_histogram(mapping=aes(x=y), bins=50, color='red', alpha=0.3)
+
+```

@@ -1,0 +1,194 @@
+---
+title: "5-Bayesian-M-V"
+format: html
+editor: visual
+---
+
+## A Bayesian workflow for M&V
+
+```{r}
+library(rstan)
+library(tidyverse)
+library(lubridate)
+
+# Baseline data: one year
+df.base <- read_csv("data/building60preoffice.csv") %>% 
+  mutate(DateTime = mdy_hm(Date),
+         Date = as_date(DateTime))
+
+# Post-retrofit data: one year
+df.repo <- read_csv("data/building62postoffice.csv") %>% 
+  mutate(DateTime = mdy_hm(Date),
+         Date = as_date(DateTime))
+
+# Plot the original data
+head(df.base)
+```
+
+```{r}
+ggplot(data = df.base) + geom_line(mapping = aes(x=DateTime, y=`Building 6 kW`))
+
+daily.average <- function(df) {
+  df %>% 
+    group_by(Date) %>% 
+    summarise(OAT = mean(OAT),
+              E = sum(`Building 6 kW`),
+              .groups = 'drop'
+    ) %>% 
+    mutate(wday = wday(Date),
+           week.end = wday==1 | wday==7,
+           T = (OAT-32) * 5/9)
+}
+
+df.base.daily <- daily.average(df.base)
+df.repo.daily <- daily.average(df.repo)
+
+ggplot(data = df.base.daily) +
+  geom_point(mapping = aes(x=T, y=E, color=week.end))
+```
+
+```{r}
+changepoint <- "
+functions {
+  // This chunk is the formula for the changepoint model which will be used several times in this program
+  real power_mean(int w, real t, vector alpha, vector beta_h, vector tau_h, vector beta_c, vector tau_c) {
+    real a = w ? alpha[1] : alpha[2];    // condition on the type of day
+    real heat = w ? beta_h[1] * fmax(tau_h[1]-t, 0) : beta_h[2] * fmax(tau_h[2]-t, 0) ;
+    real cool = w ? beta_c[1] * fmax(t-tau_c[1], 0) : beta_c[2] * fmax(t-tau_c[2], 0) ;
+    return (a + heat + cool);
+  }
+}
+data {
+  // This block declares all data which will be passed to the Stan model.
+  int<lower=0> N_base;        // number of data items in the baseline period
+  vector[N_base] t_base;      // temperature (baseline)
+  int w_base[N_base];      // categorical variable for the week ends (baseline)
+  vector[N_base] y_base;      // outcome energy vector (baseline)
+  
+  int<lower=0> N_repo;        // number of data items in the reporting period
+  vector[N_repo] t_repo;      // temperature (reporting)
+  int w_repo[N_repo];      // categorical variable for the week ends (reporting)
+  vector[N_repo] y_repo;      // outcome energy vector (reporting)
+}
+parameters {
+  // This block declares the parameters of the model. There are 10 parameters plus the error scale sigma
+  vector[2] alpha;      // baseline consumption (work days and week ends)
+  vector[2] beta_h;     // slopes for heating
+  vector[2] tau_h;      // threshold temperatures for heating
+  vector[2] beta_c;     // slopes for cooling
+  vector[2] tau_c;      // threshold temperatures for cooling
+  real<lower=0> sigma;  // error scale
+}
+model {
+  // Assigning prior distributions on some parameters
+  alpha ~ normal([400, 800], [150, 150]);
+  tau_h ~ normal(8, 5);
+  tau_c ~ normal(18, 5);
+  beta_h ~ normal(40, 15);
+  beta_c ~ normal(40, 15);
+  // Observational model
+  for (n in 1:N_base) {
+    y_base[n] ~ normal(power_mean(w_base[n], t_base[n], alpha, beta_h, tau_h, beta_c, tau_c), sigma);
+  }
+}
+generated quantities {
+  vector[N_base] y_base_pred;
+  vector[N_repo] y_repo_pred;
+  real savings = 0;
+  
+  for (n in 1:N_base) {
+    y_base_pred[n] = normal_rng(power_mean(w_base[n], t_base[n], alpha, beta_h, tau_h, beta_c, tau_c), sigma);
+  }
+  
+  for (n in 1:N_repo) {
+    y_repo_pred[n] = normal_rng(power_mean(w_repo[n], t_repo[n], alpha, beta_h, tau_h, beta_c, tau_c), sigma);
+    savings += y_repo_pred[n] - y_repo[n];
+  }
+}
+"
+
+model_data <- list(
+  N_base = nrow(df.base.daily),
+  t_base = df.base.daily$T,
+  w_base = as.numeric(df.base.daily$week.end),
+  y_base = df.base.daily$E,
+  N_repo = nrow(df.repo.daily),
+  t_repo = df.repo.daily$T,
+  w_repo = as.numeric(df.repo.daily$week.end),
+  y_repo = df.repo.daily$E
+)
+
+# Fitting the model
+fit1 <- stan(
+  model_code = changepoint,  # Stan program
+  data = model_data,        # named list of data
+  chains = 2,               # number of Markov chains
+  warmup = 1000,            # number of warmup iterations per chain
+  iter = 4000,              # total number of iterations per chain
+  cores = 2,                # number of cores (could use one per chain)
+  refresh = 0,              # progress not shown
+)
+```
+
+
+```{r}
+print(fit1, pars = c("alpha", "beta_h", "tau_h", "beta_c", "tau_c", "sigma", "savings"))
+traceplot(fit1, pars = c("alpha", "beta_h", "tau_h", "beta_c", "tau_c", "sigma", "lp__"))
+pairs(fit1, pars = c("alpha", "beta_h", "savings"))
+```
+
+```{r}
+# Extracting full predictive distributions from the stanfit object
+la <- rstan::extract(fit1, permuted = TRUE)
+y_base_pred <- la$y_base_pred
+
+# Quantiles
+y_base_quan <- apply(y_base_pred, 2, quantile, probs=c(0.025, 0.5, 0.975))
+
+# Data frame
+df.base.post <- data.frame(Date = df.base.daily$Date,
+                           T = df.base.daily$T,
+                           y = df.base.daily$E,
+                           w = df.base.daily$week.end,
+                           pred_low = y_base_quan[1, ],
+                           pred_med = y_base_quan[2, ],
+                           pred_up = y_base_quan[3, ])
+
+# Plot
+ggplot(data = df.base.post) +
+  geom_point(mapping = aes(x=T, y=y, color=w)) +
+  geom_line(data = . %>% filter(!df.base.post$w), mapping = aes(x=T, y=pred_med), color='red') +
+  geom_ribbon(data = . %>% filter(!df.base.post$w), mapping = aes(x=T, ymin=pred_low, ymax=pred_up), fill='red', alpha=0.1) +
+  geom_line(data = . %>% filter(df.base.post$w), mapping = aes(x=T, y=pred_med), color='blue') +
+  geom_ribbon(data = . %>% filter(df.base.post$w), mapping = aes(x=T, ymin=pred_low, ymax=pred_up), fill='blue', alpha=0.1)
+```
+
+```{r}
+ggplot(data = df.base.post) +
+  geom_point(mapping = aes(x=Date, y=pred_med-y)) +
+  geom_ribbon(mapping = aes(x=Date, ymin=pred_low-y, ymax=pred_up-y), alpha=0.2)
+
+ggplot(data = df.base.post) +
+  geom_point(mapping = aes(x=T, y=pred_med-y)) +
+  geom_ribbon(mapping = aes(x=T, ymin=pred_low-y, ymax=pred_up-y), alpha=0.2)
+
+# Extracting full predictive distributions from the stanfit object
+y_repo_pred <- la$y_repo_pred
+# Quantiles
+y_repo_quan <- apply(y_repo_pred, 2, quantile, probs=c(0.025, 0.5, 0.975))
+# Data frame
+df.repo.post <- data.frame(Date = df.repo.daily$Date, T = df.repo.daily$T, y = df.repo.daily$E, w = df.repo.daily$week.end,
+                           pred_low = y_repo_quan[1, ], pred_med = y_repo_quan[2, ], pred_up = y_repo_quan[3, ])
+# Plot
+ggplot(data = df.repo.post) +
+  geom_point(mapping = aes(x=T, y=y, color=w)) +
+  geom_line(data = . %>% filter(!df.repo.post$w), mapping = aes(x=T, y=pred_med), color='red') +
+  geom_ribbon(data = . %>% filter(!df.repo.post$w), mapping = aes(x=T, ymin=pred_low, ymax=pred_up), fill='red', alpha=0.1) +
+  geom_line(data = . %>% filter(df.repo.post$w), mapping = aes(x=T, y=pred_med), color='blue') +
+  geom_ribbon(data = . %>% filter(df.repo.post$w), mapping = aes(x=T, ymin=pred_low, ymax=pred_up), fill='blue', alpha=0.1)
+```
+
+```{r}
+plot(fit1, pars = c("savings"))
+```
+
