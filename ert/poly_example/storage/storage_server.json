@@ -1,0 +1,8 @@
+{
+    "urls": [
+        "http://127.0.0.1:51825",
+        "http://James:51825",
+        "http://James.localdomain:51825"
+    ],
+    "authtoken": "d7C6tQai4JWvRnsE"
+}

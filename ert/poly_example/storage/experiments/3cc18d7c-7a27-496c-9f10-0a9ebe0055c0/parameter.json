@@ -1,0 +1,1 @@
+{"COEFFS": {"name": "COEFFS", "forward_init": false, "template_file": null, "output_file": null, "transfer_function_definitions": ["a UNIFORM 0 1\n", "b UNIFORM 0 2\n", "c UNIFORM 0 5"], "forward_init_file": null, "template_file_path": null, "_ert_kind": "GenKwConfig"}}
